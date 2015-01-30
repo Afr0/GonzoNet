@@ -1,6 +1,6 @@
-/*This Source Code Form is subject to the terms of the Mozilla Public
-License, v. 2.0. If a copy of the MPL was not distributed with this
-file, You can obtain one at http://mozilla.org/MPL/2.0/.
+/*This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+If a copy of the MPL was not distributed with this file, You can obtain one at
+http://mozilla.org/MPL/2.0/.
 
 The Original Code is the TSOClient.
 
@@ -74,9 +74,13 @@ namespace GonzoNet
         public event ReceivedPacketDelegate OnReceivedData;
         public event OnConnectedDelegate OnConnected;
 
-        public NetworkClient(string IP, int Port, EncryptionMode EMode)
+        public NetworkClient(string IP, int Port, EncryptionMode EMode, bool KeepAlive)
         {
             m_Sock = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+
+			if(KeepAlive)
+				m_Sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+
             m_IP = IP;
             m_Port = Port;
 
@@ -147,11 +151,23 @@ namespace GonzoNet
         /// <param name="Data">The data that will be encrypted.</param>
         public void SendEncrypted(byte PacketID, byte[] Data)
         {
-            m_NumBytesToSend = Data.Length;
-            byte[] EncryptedData = m_ClientEncryptor.FinalizePacket(PacketID, Data);
+			byte[] EncryptedData;
 
-            m_Sock.BeginSend(EncryptedData, 0, EncryptedData.Length, SocketFlags.None,
-                new AsyncCallback(OnSend), m_Sock);
+			lock (m_ClientEncryptor)
+			{
+				m_NumBytesToSend = Data.Length;
+				EncryptedData = m_ClientEncryptor.FinalizePacket(PacketID, Data);
+			}
+
+			try
+			{
+				m_Sock.BeginSend(EncryptedData, 0, EncryptedData.Length, SocketFlags.None,
+					new AsyncCallback(OnSend), m_Sock);
+			}
+			catch(SocketException)
+			{
+				Disconnect();
+			}
         }
 
         /*public void On(PacketType PType, ReceivedPacketDelegate PacketDelegate)
@@ -195,6 +211,20 @@ namespace GonzoNet
             }
         }
 
+        private Queue<KeyValuePair<ProcessedPacket, PacketHandler>> packetQueue = new Queue<KeyValuePair<ProcessedPacket, PacketHandler>>();
+
+        public void ProcessPackets()
+        {
+            lock (packetQueue)
+            {
+                while (packetQueue.Count > 0)
+                {
+                    var elem = packetQueue.Dequeue();
+                    elem.Value.Handler(this, elem.Key);
+                }
+            }
+        }
+
         private void OnPacket(ProcessedPacket packet, PacketHandler handler)
         {
             if (OnReceivedData != null)
@@ -202,7 +232,8 @@ namespace GonzoNet
                 OnReceivedData(packet);
             }
 
-            handler.Handler(this, packet);
+            packetQueue.Enqueue(new KeyValuePair<ProcessedPacket, PacketHandler>(packet, handler));
+            //handler.Handler(this, packet);
         }
 
         protected virtual void ReceiveCallback(IAsyncResult AR)
@@ -392,6 +423,22 @@ namespace GonzoNet
                     return null;
             }
         }
+
+		/// <summary>
+		/// This socket's remote port. Will return 0 if the socket is not connected remotely.
+		/// </summary>
+		public int RemotePort
+		{
+			get
+			{
+				IPEndPoint RemoteEP = (IPEndPoint)m_Sock.RemoteEndPoint;
+
+                if (RemoteEP != null)
+                    return RemoteEP.Port;
+                else
+                    return 0;
+			}
+		}
 
         /// <summary>
         /// Disconnects this NetworkClient instance and stops
